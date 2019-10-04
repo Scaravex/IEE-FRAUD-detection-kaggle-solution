@@ -153,6 +153,63 @@ def interaction(train, test):
         
     return (train, test)
 
+def check_appearance(data, col_name):
+    #check past appearence of a column
+    data = data.copy()
+    col_prev = col_name + "_PREV"
+    col_new = col_name + "_PAST"
+    data.reset_index(level=0, inplace=True)
+    cp = data[[col_name]].copy()
+    #faccio una copia della colonna e la shifto di 1
+    cp = cp.shift(1)
+    cp.rename(columns={col_name: col_prev}, inplace=True)
+    data = data.join(cp, how="left")
+    data[col_new] = (data[col_name] == data[col_prev]).astype(int)
+    data.drop(col_prev, axis="columns", inplace=True)
+    data = data.set_index('TransactionID')
+    
+    return data
+
+def date_enricher(df_total):
+    #enrich date
+    START_DATE = datetime.datetime.strptime('2017-11-30', '%Y-%m-%d')
+    df_total['DT'] = df_total['TransactionDT'].apply(lambda x: (START_DATE + datetime.timedelta(seconds = x)))
+    df_total['DT_hour'] = df_total['DT'].dt.hour
+    df_total['DT_day'] = df_total['DT'].dt.day
+    df_total['DT_month'] = df_total['DT'].dt.month
+    df_total['DT_year'] = df_total['DT'].dt.year
+    
+    return df_total
+    
+
+def make_count_1(feature, df):
+   temp = df[feature].value_counts(dropna=False)
+   new_feature = feature + '_count'
+   df[new_feature] = df[feature].map(temp)
+
+def make_count_2(feature, train, test):
+    temp = pd.concat([train[feature], test[feature]], ignore_index=True).value_counts(dropna=True)
+    new_feature = feature + '_count'
+    train[new_feature] = train[feature].map(temp)
+    test[new_feature] = test[feature].map(temp)
+    
+def flag_previous_transaction_below_amt(df, amt, df_final):   
+    # Check if for a specific card id I had transations below 10$ in the past
+    df = df.copy()
+    df.reset_index(level=0, inplace=True)
+    df_small_amt = df.loc[df['TransactionAmt']<=amt, ['card_id','TransactionDT', 'TransactionID']]   
+    df_all = df[['card_id','TransactionDT','TransactionID']].merge(df_small_amt, how='left', left_on='card_id', right_on='card_id')
+    #tieni solo quando la funzione è precedente a quello in analisi (/& maggiore d_y -30 gg)
+    df_all = df_all.loc[(df_all.TransactionDT_x > df_all.TransactionDT_y) &  (df_all.TransactionDT_x>df_all.TransactionDT_x-60*24*30)]
+    col_name = 'hasPreviousLesser'+format(amt)
+    df_all[col_name] = 1
+    df_all.rename(columns={'TransactionID_x': 'TransactionID'}, inplace=True)
+    df_all = df_all[['TransactionID', col_name]].drop_duplicates()
+    df_all = df_all.set_index('TransactionID')
+    res = df_final.merge(df_all, how='left', on = "TransactionID")
+    res[col_name].fillna(0, inplace=True)
+    
+    return(res)
     
 def feature_engineering(train, test):
     '''
@@ -207,20 +264,7 @@ def feature_engineering(train, test):
     test['is_null_device_info']  =  test ["DeviceInfo"].apply(lambda x: False if (pd.isnull(x)) else True)
     # stats.pearsonr(train["is_null_device_info"], train["isFraud"]) #0.10
 
-    def check_appearance(data, col_name):
-        data = data.copy()
-        col_prev = col_name + "_PREV"
-        col_new = col_name + "_PAST"
-        data.reset_index(level=0, inplace=True)
-        cp = data[[col_name]].copy()
-        #faccio una copia della colonna e la shifto di 1
-        cp = cp.shift(1)
-        cp.rename(columns={col_name: col_prev}, inplace=True)
-        data = data.join(cp, how="left")
-        data[col_new] = (data[col_name] == data[col_prev]).astype(int)
-        data.drop(col_prev, axis="columns", inplace=True)
-        data = data.set_index('TransactionID')
-        return data
+
 
     # Check past appearance for combination of card id and p email domain
     train['card_id_P_emaildomain'] = train['card_id']+'--'+train['P_emaildomain']
@@ -306,14 +350,7 @@ def feature_engineering(train, test):
     #train ['TransactionDT_norm_days'] = ((train['TransactionDT'] - train['TransactionDT'].min())/3600)/24
     #test  ['TransactionDT_norm_days'] = ((test ['TransactionDT'] - test ['TransactionDT'].min())/3600)/24
     
-    def date_enricher(df_total):
-        START_DATE = datetime.datetime.strptime('2017-11-30', '%Y-%m-%d')
-        df_total['DT'] = df_total['TransactionDT'].apply(lambda x: (START_DATE + datetime.timedelta(seconds = x)))
-        df_total['DT_hour'] = df_total['DT'].dt.hour
-        df_total['DT_day'] = df_total['DT'].dt.day
-        df_total['DT_month'] = df_total['DT'].dt.month
-        df_total['DT_year'] = df_total['DT'].dt.year
-        return df_total
+
     train = date_enricher(train)
     test  = date_enricher(test)    
         
@@ -369,22 +406,6 @@ def feature_engineering(train, test):
     #Infine come identificare transazioni che hanno avuto un precedente con amount superiore a soglia stabilita
     # Check if for given card_id there are past transactions below a certain amount
     
-    def flag_previous_transaction_below_amt(df, amt, df_final):   
-        # Check if for a specific card id I had transations below 10$ in the past
-        df = df.copy()
-        df.reset_index(level=0, inplace=True)
-        df_small_amt = df.loc[df['TransactionAmt']<=amt, ['card_id','TransactionDT', 'TransactionID']]   
-        df_all = df[['card_id','TransactionDT','TransactionID']].merge(df_small_amt, how='left', left_on='card_id', right_on='card_id')
-        #tieni solo quando la funzione è precedente a quello in analisi (/& maggiore d_y -30 gg)
-        df_all = df_all.loc[(df_all.TransactionDT_x > df_all.TransactionDT_y) &  (df_all.TransactionDT_x>df_all.TransactionDT_x-60*24*30)]
-        col_name = 'hasPreviousLesser'+format(amt)
-        df_all[col_name] = 1
-        df_all.rename(columns={'TransactionID_x': 'TransactionID'}, inplace=True)
-        df_all = df_all[['TransactionID', col_name]].drop_duplicates()
-        df_all = df_all.set_index('TransactionID')
-        res = df_final.merge(df_all, how='left', on = "TransactionID")
-        res[col_name].fillna(0, inplace=True)
-        return(res)
     
     train2 = flag_previous_transaction_below_amt(df=train[['card_id','TransactionDT','TransactionAmt']],amt=10,df_final=train)
     test2  = flag_previous_transaction_below_amt(df=test[['card_id','TransactionDT','TransactionAmt']],amt=10,df_final=test)
@@ -408,16 +429,7 @@ def feature_engineering(train, test):
     train = train.drop(['is_null_id_30','is_null_device_info'],axis = 1)
     test = test.drop(['is_null_id_30','is_null_device_info'], axis = 1)
     #7 Counter
-    def make_count_1(feature, df):
-        temp = df[feature].value_counts(dropna=False)
-        new_feature = feature + '_count'
-        df[new_feature] = df[feature].map(temp)
 
-    def make_count_2(feature, train, test):
-        temp = pd.concat([train[feature], test[feature]], ignore_index=True).value_counts(dropna=True)
-        new_feature = feature + '_count'
-        train[new_feature] = train[feature].map(temp)
-        test[new_feature] = test[feature].map(temp)
     
     make_count_1("device_hash", train)
     make_count_1("device_hash", test)
